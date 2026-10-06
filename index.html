@@ -210,7 +210,8 @@
         let analyser = null;
         let dataArray = null;
         let microphone = null;
-        let echoNode = null; // 回音延迟节点
+        let mediaStream = null;
+        let echoNode = null;
         
         let isMonitoring = false;
         let triggerCooldown = false; 
@@ -254,33 +255,32 @@
             } catch (err) {}
         }
 
-        // 初始化回音/混响效果节点网络
+        // 单例初始化回音节点
         function initEchoEffect() {
-            if (!audioContext) return;
+            if (!audioContext || echoNode) return;
             
-            // 创建 0.22s 延迟节点
-            const delay = audioContext.createDelay();
-            delay.delayTime.value = 0.22;
+            try {
+                const delay = audioContext.createDelay();
+                delay.delayTime.value = 0.22;
 
-            // 回音衰减增益
-            const feedback = audioContext.createGain();
-            feedback.gain.value = 0.38;
+                const feedback = audioContext.createGain();
+                feedback.gain.value = 0.38;
 
-            // 低通滤波器，让回音越来越低沉且自然
-            const filter = audioContext.createBiquadFilter();
-            filter.type = 'lowpass';
-            filter.frequency.value = 280;
+                const filter = audioContext.createBiquadFilter();
+                filter.type = 'lowpass';
+                filter.frequency.value = 280;
 
-            // 构成 Feedback 循环
-            delay.connect(filter);
-            filter.connect(feedback);
-            feedback.connect(delay);
-            delay.connect(audioContext.destination);
+                delay.connect(filter);
+                filter.connect(feedback);
+                feedback.connect(delay);
+                delay.connect(audioContext.destination);
 
-            echoNode = delay;
+                echoNode = delay;
+            } catch (e) {
+                console.error("回音效果节点创建失败:", e);
+            }
         }
 
-        // 合成影院级转折低音冲击声（带回音）
         function createCinematicBoom(time) {
             if (!audioContext) return;
 
@@ -288,24 +288,20 @@
             const gain = audioContext.createGain();
             const filter = audioContext.createBiquadFilter();
 
-            // 低通滤波削弱高频杂音，强化低音沉降感
             filter.type = 'lowpass';
             filter.frequency.setValueAtTime(450, time);
             filter.frequency.exponentialRampToValueAtTime(40, time + 0.8);
 
-            // 快速向下扫频 (130Hz -> 32Hz)，产生强烈的撞击 Boom 效果
             osc.type = 'sine';
             osc.frequency.setValueAtTime(130, time);
             osc.frequency.exponentialRampToValueAtTime(32, time + 0.7);
 
-            // 音量衰减曲线（保留一定的长尾包络）
             gain.gain.setValueAtTime(1.2, time);
             gain.gain.exponentialRampToValueAtTime(0.001, time + 0.85);
 
             osc.connect(filter);
             filter.connect(gain);
 
-            // 同时输出到扬声器和回音网络
             gain.connect(audioContext.destination);
             if (echoNode) {
                 gain.connect(echoNode);
@@ -315,12 +311,152 @@
             osc.stop(time + 0.85);
         }
 
-        // 触发转折“咚咚”双击声
         function triggerDoubleKnock() {
             if (triggerCooldown) return;
             triggerCooldown = true;
             statusText.textContent = "⚠️ 触发提示！5秒冷却中...";
 
             const now = audioContext.currentTime;
-            createCinematicBoom(now);         // 第一声“咚”
+            createCinematicBoom(now);
             createCinematicBoom(now + 0.28);
+
+            triggerCount++;
+            triggerCountSpan.textContent = triggerCount;
+            emptyTip.style.display = 'none';
+
+            const timeStr = getChinaTimeString();
+            const li = document.createElement('li');
+            li.innerHTML = `<span>${timeStr}</span> <span>音量:${currentAudio} | 震动:${currentVib}</span>`;
+            logList.insertBefore(li, logList.firstChild);
+
+            setTimeout(() => {
+                triggerCooldown = false;
+                if (isMonitoring) statusText.textContent = "监测中...";
+            }, 5000);
+        }
+
+        clearBtn.addEventListener('click', () => {
+            triggerCount = 0;
+            triggerCountSpan.textContent = '0';
+            logList.innerHTML = '';
+            emptyTip.style.display = 'block';
+        });
+
+        function handleMotion(event) {
+            if (!isMonitoring) return;
+            const acc = event.acceleration;
+            if (acc) {
+                const x = acc.x || 0;
+                const y = acc.y || 0;
+                const z = acc.z || 0;
+
+                const dx = x - lastX;
+                const dy = y - lastY;
+                const dz = z - lastZ;
+
+                lastX = x;
+                lastY = y;
+                lastZ = z;
+
+                const delta = Math.sqrt(dx * dx + dy * dy + dz * dz);
+                currentVib = delta.toFixed(2);
+            }
+        }
+
+        function monitorLoop() {
+            if (!isMonitoring) return;
+
+            analyser.getByteFrequencyData(dataArray);
+            let sum = 0;
+            for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
+            currentAudio = Math.round(sum / dataArray.length);
+
+            document.getElementById('audio-num').textContent = currentAudio;
+            document.getElementById('audio-level').style.height = currentAudio + '%';
+            
+            const vibVal = parseFloat(currentVib);
+            document.getElementById('vib-num').textContent = currentVib;
+            document.getElementById('vib-level').style.height = Math.min((vibVal / 2.0) * 100, 100) + '%';
+
+            const thAudio = parseInt(document.getElementById('audio-th').value);
+            const thVib = parseFloat(document.getElementById('vib-th').value);
+
+            const isAudioSatisfied = currentAudio >= thAudio;
+            const isVibSatisfied = !ignoreVibCheck.checked && (vibVal >= thVib);
+
+            if ((isAudioSatisfied || isVibSatisfied) && !triggerCooldown) {
+                triggerDoubleKnock();
+            }
+
+            requestAnimationFrame(monitorLoop);
+        }
+
+        async function startMonitoring() {
+            try {
+                // 1. 在点击的第一时间优先唤醒 AudioContext（关键修补：满足 iOS 手势时效）
+                if (!audioContext) {
+                    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+                    audioContext = new AudioContextClass();
+                }
+                if (audioContext.state === 'suspended') {
+                    await audioContext.resume();
+                }
+
+                // 2. 初始化回音效果
+                initEchoEffect();
+
+                // 3. 请求震动传感器权限（非阻塞调用）
+                if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+                    DeviceMotionEvent.requestPermission().catch(e => console.log('震动权限未获批:', e));
+                }
+                window.removeEventListener('devicemotion', handleMotion, true);
+                window.addEventListener('devicemotion', handleMotion, true);
+
+                // 4. 获取麦克风流
+                mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+                analyser = audioContext.createAnalyser();
+                analyser.fftSize = 2048;
+                dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+                microphone = audioContext.createMediaStreamSource(mediaStream);
+                microphone.connect(analyser);
+
+                isMonitoring = true;
+                startBtn.disabled = true;
+                stopBtn.disabled = false;
+                statusText.textContent = "监测中...";
+
+                await requestWakeLock();
+                monitorLoop();
+
+            } catch (err) {
+                console.error("启动失败:", err);
+                alert("启动失败: " + (err.message || err.name || "请检查麦克风权限"));
+            }
+        }
+
+        function stopMonitoring() {
+            isMonitoring = false;
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+            statusText.textContent = "未启动";
+            window.removeEventListener('devicemotion', handleMotion, true);
+            
+            // 彻底关闭并释放麦克风硬件资源
+            if (mediaStream) {
+                mediaStream.getTracks().forEach(track => track.stop());
+                mediaStream = null;
+            }
+            if (microphone) {
+                microphone.disconnect();
+                microphone = null;
+            }
+            if (wakeLock) wakeLock.release().then(() => wakeLock = null);
+        }
+
+        startBtn.addEventListener('click', startMonitoring);
+        stopBtn.addEventListener('click', stopMonitoring);
+    </script>
+</body>
+</html>
