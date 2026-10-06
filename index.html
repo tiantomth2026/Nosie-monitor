@@ -96,7 +96,6 @@
 
         .status { margin-top: 10px; color: #e74c3c; font-weight: bold; min-height: 20px; font-size: 0.9rem;}
 
-        /* 日志记录样式 */
         .log-section {
             margin-top: 20px;
             background: white;
@@ -195,7 +194,6 @@
         <button class="btn-main" id="stopBtn" disabled>停止</button>
     </div>
 
-    <!-- 触发日志与统计区 -->
     <div class="log-section">
         <div class="log-header">
             <span>🚨 触发记录（共 <strong id="trigger-count" style="color: #e74c3c;">0</strong> 次）</span>
@@ -274,7 +272,7 @@
         function triggerDoubleKnock() {
             if (triggerCooldown) return;
             triggerCooldown = true;
-            statusText.textContent = "⚠️ 触发提示！5秒冷却中...";
+            statusText.textContent = "⚠️️ 触发提示！5秒冷却中...";
 
             const now = audioContext.currentTime;
             createKickSound(now);
@@ -304,9 +302,12 @@
 
         function handleMotion(event) {
             if (!isMonitoring) return;
-            const acc = event.acceleration;
+            const acc = event.acceleration || event.accelerationIncludingGravity;
             if (acc) {
-                const vector = Math.sqrt((acc.x || 0) ** 2 + (acc.y || 0) ** 2 + (acc.z || 0) ** 2);
+                const x = acc.x || 0;
+                const y = acc.y || 0;
+                const z = acc.z || 0;
+                const vector = Math.sqrt(x * x + y * y + z * z);
                 currentVib = vector.toFixed(1);
             }
         }
@@ -328,7 +329,6 @@
             const thAudio = parseInt(document.getElementById('audio-th').value);
             const thVib = parseFloat(document.getElementById('vib-th').value);
 
-            // 如果勾选了电脑测试模式，直接忽略震动判断
             const isVibSatisfied = ignoreVibCheck.checked || (currentVib >= thVib);
 
             if (currentAudio >= thAudio && isVibSatisfied && !triggerCooldown) {
@@ -340,7 +340,23 @@
 
         async function startMonitoring() {
             try {
-                // 1. 初始化麦克风音频
+                // 1. 优先获取 iOS 动作与震动传感器权限 (必须放在点击事件的最开始)
+                if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+                    try {
+                        const response = await DeviceMotionEvent.requestPermission();
+                        if (response !== 'granted') {
+                            alert('未能获得震动传感器授权，请检查 Safari 设置。');
+                        }
+                    } catch (e) {
+                        console.log('申请动作传感器权限异常:', e);
+                    }
+                }
+                window.addEventListener('devicemotion', handleMotion, true);
+
+                // 2. 申请麦克风权限
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+                // 3. 初始化 AudioContext
                 if (!audioContext) {
                     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
                     audioContext = new AudioContextClass();
@@ -351,21 +367,10 @@
                 analyser.fftSize = 2048;
                 dataArray = new Uint8Array(analyser.frequencyBinCount);
 
-                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
                 microphone = audioContext.createMediaStreamSource(stream);
                 microphone.connect(analyser);
 
-                // 2. 尝试初始化加速度传感器（兼容处理）
-                try {
-                    if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
-                        await DeviceMotionEvent.requestPermission();
-                    }
-                    window.addEventListener('devicemotion', handleMotion);
-                } catch (e) {
-                    console.log("当前设备不支持震动传感器，已忽略。");
-                }
-
-                // 3. 更新界面状态
+                // 4. 更新运行状态
                 isMonitoring = true;
                 startBtn.disabled = true;
                 stopBtn.disabled = false;
@@ -376,7 +381,7 @@
 
             } catch (err) {
                 console.error(err);
-                alert("启动失败，请检查是否已通过 http://localhost:8000 运行并开启了麦克风权限！");
+                alert("启动失败，请检查是否允许了麦克风权限。");
             }
         }
 
@@ -385,7 +390,7 @@
             startBtn.disabled = false;
             stopBtn.disabled = true;
             statusText.textContent = "未启动";
-            window.removeEventListener('devicemotion', handleMotion);
+            window.removeEventListener('devicemotion', handleMotion, true);
             
             if (microphone) {
                 microphone.disconnect();
