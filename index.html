@@ -48,7 +48,7 @@
             position: absolute;
             bottom: 0; left: 0; right: 0;
             background: rgba(255,255,255,0.3);
-            transition: height 0.1s;
+            transition: height 0.05s;
         }
 
         .num {
@@ -165,10 +165,10 @@
         </div>
         <!-- 震动面板 -->
         <div class="meter-box">
-            <div>物理震动</div>
+            <div>震动冲击强度</div>
             <div class="meter" id="vib-meter">
                 <div class="level" id="vib-level"></div>
-                <div class="num" id="vib-num">0</div>
+                <div class="num" id="vib-num">0.00</div>
             </div>
         </div>
     </div>
@@ -177,8 +177,8 @@
         <label>🔊 声音触发阈值：<strong id="audio-th-val">50</strong></label>
         <input type="range" id="audio-th" min="10" max="90" value="50">
         
-        <label>📳 震动触发阈值：<strong id="vib-th-val">3</strong></label>
-        <input type="range" id="vib-th" min="1" max="20" value="3" step="0.5">
+        <label>📳 震动触发阈值：<strong id="vib-th-val">0.20</strong></label>
+        <input type="range" id="vib-th" min="0.05" max="2.00" value="0.20" step="0.05">
 
         <div class="pc-mode-box">
             <label>
@@ -210,6 +210,7 @@
         let analyser = null;
         let dataArray = null;
         let microphone = null;
+        let echoNode = null; // 回音延迟节点
         
         let isMonitoring = false;
         let triggerCooldown = false; 
@@ -217,7 +218,9 @@
         let triggerCount = 0;
 
         let currentAudio = 0;
-        let currentVib = 0;
+        let currentVib = "0.00";
+
+        let lastX = 0, lastY = 0, lastZ = 0;
 
         const startBtn = document.getElementById('startBtn');
         const stopBtn = document.getElementById('stopBtn');
@@ -229,7 +232,7 @@
         const ignoreVibCheck = document.getElementById('ignore-vib-check');
 
         document.getElementById('audio-th').addEventListener('input', e => document.getElementById('audio-th-val').textContent = e.target.value);
-        document.getElementById('vib-th').addEventListener('input', e => document.getElementById('vib-th-val').textContent = e.target.value);
+        document.getElementById('vib-th').addEventListener('input', e => document.getElementById('vib-th-val').textContent = parseFloat(e.target.value).toFixed(2));
 
         function getChinaTimeString() {
             const now = new Date();
@@ -251,156 +254,73 @@
             } catch (err) {}
         }
 
-        function createKickSound(time) {
+        // 初始化回音/混响效果节点网络
+        function initEchoEffect() {
             if (!audioContext) return;
-            const osc = audioContext.createOscillator();
-            const gain = audioContext.createGain();
             
-            osc.connect(gain);
-            gain.connect(audioContext.destination);
-            
-            osc.frequency.setValueAtTime(150, time);
-            osc.frequency.exponentialRampToValueAtTime(0.01, time + 0.5);
-            
-            gain.gain.setValueAtTime(1, time);
-            gain.gain.exponentialRampToValueAtTime(0.01, time + 0.5);
-            
-            osc.start(time);
-            osc.stop(time + 0.5);
+            // 创建 0.22s 延迟节点
+            const delay = audioContext.createDelay();
+            delay.delayTime.value = 0.22;
+
+            // 回音衰减增益
+            const feedback = audioContext.createGain();
+            feedback.gain.value = 0.38;
+
+            // 低通滤波器，让回音越来越低沉且自然
+            const filter = audioContext.createBiquadFilter();
+            filter.type = 'lowpass';
+            filter.frequency.value = 280;
+
+            // 构成 Feedback 循环
+            delay.connect(filter);
+            filter.connect(feedback);
+            feedback.connect(delay);
+            delay.connect(audioContext.destination);
+
+            echoNode = delay;
         }
 
+        // 合成影院级转折低音冲击声（带回音）
+        function createCinematicBoom(time) {
+            if (!audioContext) return;
+
+            const osc = audioContext.createOscillator();
+            const gain = audioContext.createGain();
+            const filter = audioContext.createBiquadFilter();
+
+            // 低通滤波削弱高频杂音，强化低音沉降感
+            filter.type = 'lowpass';
+            filter.frequency.setValueAtTime(450, time);
+            filter.frequency.exponentialRampToValueAtTime(40, time + 0.8);
+
+            // 快速向下扫频 (130Hz -> 32Hz)，产生强烈的撞击 Boom 效果
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(130, time);
+            osc.frequency.exponentialRampToValueAtTime(32, time + 0.7);
+
+            // 音量衰减曲线（保留一定的长尾包络）
+            gain.gain.setValueAtTime(1.2, time);
+            gain.gain.exponentialRampToValueAtTime(0.001, time + 0.85);
+
+            osc.connect(filter);
+            filter.connect(gain);
+
+            // 同时输出到扬声器和回音网络
+            gain.connect(audioContext.destination);
+            if (echoNode) {
+                gain.connect(echoNode);
+            }
+
+            osc.start(time);
+            osc.stop(time + 0.85);
+        }
+
+        // 触发转折“咚咚”双击声
         function triggerDoubleKnock() {
             if (triggerCooldown) return;
             triggerCooldown = true;
-            statusText.textContent = "⚠️️ 触发提示！5秒冷却中...";
+            statusText.textContent = "⚠️ 触发提示！5秒冷却中...";
 
             const now = audioContext.currentTime;
-            createKickSound(now);
-            createKickSound(now + 0.3);
-
-            triggerCount++;
-            triggerCountSpan.textContent = triggerCount;
-            emptyTip.style.display = 'none';
-
-            const timeStr = getChinaTimeString();
-            const li = document.createElement('li');
-            li.innerHTML = `<span>${timeStr}</span> <span>音量:${currentAudio} | 震动:${currentVib}</span>`;
-            logList.insertBefore(li, logList.firstChild);
-
-            setTimeout(() => {
-                triggerCooldown = false;
-                if (isMonitoring) statusText.textContent = "监测中...";
-            }, 5000);
-        }
-
-        clearBtn.addEventListener('click', () => {
-            triggerCount = 0;
-            triggerCountSpan.textContent = '0';
-            logList.innerHTML = '';
-            emptyTip.style.display = 'block';
-        });
-
-        function handleMotion(event) {
-            if (!isMonitoring) return;
-            const acc = event.acceleration || event.accelerationIncludingGravity;
-            if (acc) {
-                const x = acc.x || 0;
-                const y = acc.y || 0;
-                const z = acc.z || 0;
-                const vector = Math.sqrt(x * x + y * y + z * z);
-                currentVib = vector.toFixed(1);
-            }
-        }
-
-        function monitorLoop() {
-            if (!isMonitoring) return;
-
-            analyser.getByteFrequencyData(dataArray);
-            let sum = 0;
-            for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
-            currentAudio = Math.round(sum / dataArray.length);
-
-            document.getElementById('audio-num').textContent = currentAudio;
-            document.getElementById('audio-level').style.height = currentAudio + '%';
-            
-            document.getElementById('vib-num').textContent = currentVib;
-            document.getElementById('vib-level').style.height = Math.min((currentVib / 20) * 100, 100) + '%';
-
-            const thAudio = parseInt(document.getElementById('audio-th').value);
-            const thVib = parseFloat(document.getElementById('vib-th').value);
-
-            const isVibSatisfied = ignoreVibCheck.checked || (currentVib >= thVib);
-
-            if (currentAudio >= thAudio && isVibSatisfied && !triggerCooldown) {
-                triggerDoubleKnock();
-            }
-
-            requestAnimationFrame(monitorLoop);
-        }
-
-        async function startMonitoring() {
-            try {
-                // 1. 优先获取 iOS 动作与震动传感器权限 (必须放在点击事件的最开始)
-                if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
-                    try {
-                        const response = await DeviceMotionEvent.requestPermission();
-                        if (response !== 'granted') {
-                            alert('未能获得震动传感器授权，请检查 Safari 设置。');
-                        }
-                    } catch (e) {
-                        console.log('申请动作传感器权限异常:', e);
-                    }
-                }
-                window.addEventListener('devicemotion', handleMotion, true);
-
-                // 2. 申请麦克风权限
-                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-
-                // 3. 初始化 AudioContext
-                if (!audioContext) {
-                    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-                    audioContext = new AudioContextClass();
-                }
-                if (audioContext.state === 'suspended') await audioContext.resume();
-
-                analyser = audioContext.createAnalyser();
-                analyser.fftSize = 2048;
-                dataArray = new Uint8Array(analyser.frequencyBinCount);
-
-                microphone = audioContext.createMediaStreamSource(stream);
-                microphone.connect(analyser);
-
-                // 4. 更新运行状态
-                isMonitoring = true;
-                startBtn.disabled = true;
-                stopBtn.disabled = false;
-                statusText.textContent = "监测中...";
-
-                await requestWakeLock();
-                monitorLoop();
-
-            } catch (err) {
-                console.error(err);
-                alert("启动失败，请检查是否允许了麦克风权限。");
-            }
-        }
-
-        function stopMonitoring() {
-            isMonitoring = false;
-            startBtn.disabled = false;
-            stopBtn.disabled = true;
-            statusText.textContent = "未启动";
-            window.removeEventListener('devicemotion', handleMotion, true);
-            
-            if (microphone) {
-                microphone.disconnect();
-                microphone = null;
-            }
-            if (wakeLock) wakeLock.release().then(() => wakeLock = null);
-        }
-
-        startBtn.addEventListener('click', startMonitoring);
-        stopBtn.addEventListener('click', stopMonitoring);
-    </script>
-</body>
-</html>
+            createCinematicBoom(now);         // 第一声“咚”
+            createCinematicBoom(now + 0.28);
